@@ -22,10 +22,18 @@ Uses **only the Python standard library** — no `pip install` required.
 ## Requirements
 
 - Python 3.8+
-- An Octopus Deploy API key. The key's user needs at least read access to
-  Users, Teams, User Roles, and Spaces across the account — a **System
-  Manager**-level (or higher) key is the simplest way to guarantee that. A
-  key scoped to a single space will only see that space's teams/roles.
+- An Octopus Deploy API key whose user has:
+  - **System-level** `UserView`, `TeamView`, `UserRoleView`, and `SpaceView`
+    (the built-in **System Manager** role covers these)
+  - **Space-level** `TeamView`, `ProjectView`, `ProjectGroupView`,
+    `EnvironmentView`, and `TenantView` in every space you want reported.
+    System Manager has **no** space-level permissions, so also add the key's
+    user to a team with **Space Manager** (or a custom read-only role) in
+    each space. Without this, that space's teams, role grants, and scope
+    names will be missing from the report.
+
+  Run `validate_octopus_api_key.py` (see [Troubleshooting](#troubleshooting))
+  to confirm a key has everything before generating a report.
   See [Octopus's guide on creating an API key](https://octopus.com/docs/octopus-rest-api/how-to-create-an-api-key)
   if you need one.
 
@@ -258,13 +266,66 @@ script.
 
 ## Troubleshooting
 
+### Step 1: validate the API key
+
+If the report is empty or missing data, run `validate_octopus_api_key.py`
+first. It calls every endpoint the report uses, read-only, and shows each
+failure with Octopus's own error message. The report itself treats several
+failures as "no data", so it can produce an empty report with no error.
+
+```bash
+# Bash
+export OCTOPUS_API_KEY="API-XXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+python3 validate_octopus_api_key.py --url https://myinstance.octopus.app
+```
+
+```powershell
+# PowerShell
+$env:OCTOPUS_API_KEY = "API-XXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+python validate_octopus_api_key.py --url https://myinstance.octopus.app
+```
+
+Pass the same `--spaces` value you use for the report so the validator
+checks the same spaces. Other options:
+
+| Option | Description | Default |
+|---|---|---|
+| `--url` | Octopus Server root URL | *(required)* |
+| `--api-key` | API key | falls back to `OCTOPUS_API_KEY` |
+| `--spaces` | Comma-separated space names or IDs, same as the report | all spaces |
+| `--sample` | How many teams/users to probe for per-item calls | `5` |
+| `--full` | Probe every team, user, and space (slower) | off |
+| `--json-out` | Also write results to a JSON file | off |
+| `--verbose` | Print each request URL to stderr | off |
+
+The validator checks, in order:
+
+1. **Connectivity**: the URL format and that `/api` responds as Octopus Deploy
+2. **Identity**: who owns the key (`/api/users/me`), and whether that user is
+   active or a service account
+3. **Effective permissions**: reads `/api/users/{id}/permissions` and compares
+   it against the system and per-space permissions listed under
+   [Requirements](#requirements), including grants restricted to specific
+   projects, environments, or tenants
+4. **Report API calls**: probes each endpoint the report uses and reports the
+   HTTP status and how many items came back
+
+Each result is `PASS`, `WARN`, `FAIL`, `INFO`, or `SKIP`, with a suggested
+fix for every `WARN` and `FAIL`. The exit code is `0` when nothing failed and
+`1` when anything did, so you can use it as a pre-check in automation.
+
+### Step 2: match the symptom
+
 | Symptom | Likely cause |
 |---|---|
 | `Authentication failed (401)` | API key is wrong, expired, or revoked |
-| `Forbidden (403)` | The API key's user doesn't have read access to Users/Teams/Roles at the system level — use a System Manager-level key, or narrow with `--spaces` if you only need specific spaces you do have access to |
-| Report shows very few teams/roles | The key's user may only see teams they're a member of on some server configurations — try a higher-privileged key |
+| `Forbidden (403)` | The API key's user is missing a required system permission. The validator names the exact permission |
+| Report is empty but no error was printed | Usually a wrong `--url`. It must be the server root (e.g. `https://myinstance.octopus.app`), with no `/app`, `/api`, or browser path. The report treats 404 responses as empty results |
+| Users show no teams or roles | The key can't read other users' team memberships (`/api/users/{id}/teams`). The report hides this error; the validator's "User team resolution" check shows it |
+| Report shows very few teams/roles | The key has system permissions but no space-level permissions in some spaces. Typical of a System Manager-only key. Add the key's user to a Space Manager team in each space |
+| `--spaces` run returns no teams for anyone | The `--spaces` value matched no space names or IDs, so the report ran with zero spaces |
 | Slow run on a large instance | Reduce with `--spaces`, raise `--max-workers`, or pass `--no-resolve-scope-names` |
-| Scope shows raw GUIDs instead of names | `--no-resolve-scope-names` was passed, or the API key can't read into that space |
+| Scope shows raw GUIDs instead of names | `--no-resolve-scope-names` was passed, or the key lacks `ProjectView`, `ProjectGroupView`, `EnvironmentView`, or `TenantView` in that space |
 
 ## Extending
 
